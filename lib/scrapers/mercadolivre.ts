@@ -27,7 +27,17 @@ export async function scrapeMercadoLivre(url: string): Promise<Product> {
   // Basta passarmos a URL original.
   const proxyUrl = `https://api.scrapingant.com/v2/general?url=${encodeURIComponent(url)}&x-api-key=${scrapingAntKey}&proxy_country=BR&browser=false`;
 
-  const response = await fetch(proxyUrl);
+  let response;
+  try {
+    response = await fetch(proxyUrl, { 
+      signal: AbortSignal.timeout(50000) 
+    });
+  } catch (err: any) {
+    if (err.name === 'TimeoutError' || err.name === 'AbortError') {
+      throw new Error("A conexão com o proxy demorou muito e foi interrompida. O Mercado Livre pode estar mais lento que o normal. Tente novamente.");
+    }
+    throw err;
+  }
   
   if (!response.ok) {
     throw new Error(`Falha ao extrair página via Proxy. Status: ${response.status}`);

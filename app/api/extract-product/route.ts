@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { scrapeAmazon } from "@/lib/scrapers/amazon";
 import { scrapeMercadoLivre } from "@/lib/scrapers/mercadolivre";
+import { scrapeAliExpress } from "@/lib/scrapers/aliexpress";
 import { detectPlatform, resolveShortUrl } from "@/lib/scrapers/index";
 import type { ExtractProductResponse } from "@/types/product";
 
@@ -35,7 +36,7 @@ export async function POST(request: NextRequest) {
     // For ML, skip resolveShortUrl (ML scraper handles it internally with Googlebot UA)
     // For others, resolve short URLs and re-detect if needed
     let resolvedUrl = url;
-    if (platform !== "mercadolivre") {
+    if (platform !== "mercadolivre" && platform !== "aliexpress") {
       resolvedUrl = await resolveShortUrl(url);
       if (platform === "unknown") {
         platform = detectPlatform(resolvedUrl);
@@ -47,7 +48,7 @@ export async function POST(request: NextRequest) {
         {
           success: false,
           error:
-            "Plataforma não reconhecida. Suportamos Amazon e Mercado Livre.",
+            "Plataforma não reconhecida. Suportamos Amazon, Mercado Livre e AliExpress.",
         },
         { status: 400 },
       );
@@ -61,6 +62,9 @@ export async function POST(request: NextRequest) {
         break;
       case "mercadolivre":
         product = await scrapeMercadoLivre(url);
+        break;
+      case "aliexpress":
+        product = await scrapeAliExpress(url);
         break;
       default:
         return NextResponse.json<ExtractProductResponse>(
