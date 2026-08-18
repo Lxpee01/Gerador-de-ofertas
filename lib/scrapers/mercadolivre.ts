@@ -2,11 +2,17 @@ import * as cheerio from "cheerio";
 import type { Product } from "@/types/product";
 
 function parseBrlPrice(value: number | string): string {
-  const num = typeof value === "string" ? parseFloat(value.replace(/\./g, "").replace(",", ".")) : value;
-  if (isNaN(num)) return "R$ 0,00";
+  let numStr = String(value).trim();
+  if (numStr.includes(",")) {
+    // É formato brasileiro: "1.065,56" -> removemos o ponto de milhar e trocamos a vírgula por ponto
+    numStr = numStr.replace(/\./g, "").replace(",", ".");
+  }
+  // Se não tem vírgula, já é formato americano "1065.56" ou não tem decimais "1065"
+  const num = parseFloat(numStr);
+  if (isNaN(num)) return "0,00";
   return new Intl.NumberFormat("pt-BR", {
-    style: "currency",
-    currency: "BRL",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
   }).format(num);
 }
 
@@ -63,12 +69,19 @@ export async function scrapeMercadoLivre(url: string): Promise<Product> {
   }
 
   if (!priceStr) {
+    // Evita pegar o preço antigo (que fica dentro de uma tag <s>)
     const priceElement =
       $(".ui-pdp-price__second-line .andes-money-amount__fraction").first().text().trim() ||
-      $(".andes-money-amount__fraction").first().text().trim();
+      $(".ui-pdp-price .andes-money-amount__fraction").not("s .andes-money-amount__fraction").first().text().trim() ||
+      $(".andes-money-amount__fraction").not("s .andes-money-amount__fraction").first().text().trim();
+      
     if (priceElement) {
-      priceStr = priceElement;
-      const centsElement = $(".ui-pdp-price__second-line .andes-money-amount__cents").first().text().trim();
+      priceStr = priceElement.replace(/\./g, ""); // Remove os pontos de milhar "1.065" -> "1065"
+      const centsElement = 
+        $(".ui-pdp-price__second-line .andes-money-amount__cents").first().text().trim() ||
+        $(".ui-pdp-price .andes-money-amount__cents").not("s .andes-money-amount__cents").first().text().trim() ||
+        $(".andes-money-amount__cents").not("s .andes-money-amount__cents").first().text().trim();
+        
       if (centsElement) {
         priceStr += `.${centsElement}`;
       }
@@ -85,7 +98,7 @@ export async function scrapeMercadoLivre(url: string): Promise<Product> {
   let oldPriceStr = "";
   const originalPriceElement = $("s.andes-money-amount .andes-money-amount__fraction").first().text().trim();
   if (originalPriceElement) {
-    oldPriceStr = originalPriceElement;
+    oldPriceStr = originalPriceElement.replace(/\./g, "");
     const originalCents = $("s.andes-money-amount .andes-money-amount__cents").first().text().trim();
     if (originalCents) {
       oldPriceStr += `.${originalCents}`;
@@ -106,13 +119,11 @@ export async function scrapeMercadoLivre(url: string): Promise<Product> {
     throw new Error("Não consegui encontrar a imagem do produto.");
   }
 
-  const proxiedImageUrl = `/api/proxy-image?url=${encodeURIComponent(imageUrl)}`;
-
   return {
     name,
     price,
     oldPrice,
-    imageUrl: proxiedImageUrl,
+    imageUrl: imageUrl,
     url: url,
     platform: "mercadolivre"
   };

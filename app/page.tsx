@@ -20,6 +20,11 @@ export default function HomePage() {
   const [imageCopied, setImageCopied] = useState(false);
   const [copyingImage, setCopyingImage] = useState(false);
 
+  const [useManualCoupon, setUseManualCoupon] = useState(false);
+  const [couponCode, setCouponCode] = useState("");
+  const [discountType, setDiscountType] = useState<"percent" | "money">("percent");
+  const [discountValue, setDiscountValue] = useState("");
+
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError(null);
@@ -44,13 +49,25 @@ export default function HomePage() {
         );
       }
 
-      setProduct(extractData.product);
+      let productForGeneration = extractData.product;
+      if (useManualCoupon && couponCode && discountValue) {
+        const discountText = discountType === "percent" 
+          ? `${discountValue}% de desconto` 
+          : `R$ ${discountValue} de desconto`;
+        
+        productForGeneration = {
+          ...productForGeneration,
+          coupon: `${couponCode} (${discountText})`
+        };
+      }
+
+      setProduct(productForGeneration);
       setLoadingStep("generating");
 
       const offerRes = await fetch("/api/generate-offer", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ product: extractData.product, affiliateUrl: url }),
+        body: JSON.stringify({ product: productForGeneration, affiliateUrl: url }),
       });
 
       const offerData: GenerateOfferResponse = await offerRes.json();
@@ -187,6 +204,49 @@ export default function HomePage() {
           disabled={isLoading}
           className="w-full rounded-xl border border-zinc-800 bg-zinc-900 px-4 py-3 text-zinc-100 outline-none ring-emerald-500 transition focus:ring-2 disabled:opacity-50"
         />
+
+        <div className="flex items-center gap-2">
+          <input
+            type="checkbox"
+            id="use-coupon"
+            checked={useManualCoupon}
+            onChange={(e) => setUseManualCoupon(e.target.checked)}
+            className="h-4 w-4 rounded border-zinc-800 bg-zinc-900 text-emerald-500 ring-emerald-500 focus:ring-2"
+          />
+          <label htmlFor="use-coupon" className="text-sm font-medium text-zinc-300 cursor-pointer select-none">
+            Adicionar cupom de desconto
+          </label>
+        </div>
+
+        {useManualCoupon && (
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={couponCode}
+              onChange={(e) => setCouponCode(e.target.value)}
+              placeholder="Cupom (ex: MEGA10)"
+              disabled={isLoading}
+              className="w-1/2 rounded-xl border border-zinc-800 bg-zinc-900 px-4 py-3 text-sm text-zinc-100 outline-none ring-emerald-500 transition focus:ring-2 disabled:opacity-50"
+            />
+            <select
+              value={discountType}
+              onChange={(e) => setDiscountType(e.target.value as "percent" | "money")}
+              disabled={isLoading}
+              className="w-1/4 rounded-xl border border-zinc-800 bg-zinc-900 px-2 py-3 text-sm text-zinc-100 outline-none ring-emerald-500 transition focus:ring-2 disabled:opacity-50"
+            >
+              <option value="percent">%</option>
+              <option value="money">R$</option>
+            </select>
+            <input
+              type="number"
+              value={discountValue}
+              onChange={(e) => setDiscountValue(e.target.value)}
+              placeholder="Valor"
+              disabled={isLoading}
+              className="w-1/4 rounded-xl border border-zinc-800 bg-zinc-900 px-4 py-3 text-sm text-zinc-100 outline-none ring-emerald-500 transition focus:ring-2 disabled:opacity-50"
+            />
+          </div>
+        )}
         <button
           type="submit"
           disabled={isLoading}
