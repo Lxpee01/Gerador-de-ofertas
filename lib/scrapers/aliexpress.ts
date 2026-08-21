@@ -19,6 +19,59 @@ function parseBrlPrice(value: number | string): string {
   }).format(num);
 }
 
+/**
+ * Tenta extrair dados do produto a partir do HTML sem renderização JS.
+ * O AliExpress embute dados parciais em scripts inline (DCData, runParams).
+ */
+function tryExtractFromRawHtml(html: string): Partial<Product> | null {
+  const $ = cheerio.load(html);
+  
+  // Nome via og:title (presente no HTML cru)
+  let name = $('meta[property="og:title"]').attr("content") || $("title").text().trim();
+  if (!name) return null;
+  if (name.includes(" | ")) name = name.split(" | ")[0].trim();
+  if (name.toLowerCase().startsWith("aliexpress")) name = name.replace(/^aliexpress/i, "").trim();
+  if (!name) return null;
+
+  // Imagem via DCData ou og:image
+  let imageUrl = $('meta[property="og:image"]').attr("content");
+  
+  // Tenta pegar imagens do DCData embutido no HTML
+  if (!imageUrl) {
+    const dcMatch = html.match(/window\._d_c_\.DCData\s*=\s*(\{[\s\S]*?\});/);
+    if (dcMatch) {
+      try {
+        const dcData = JSON.parse(dcMatch[1]);
+        if (dcData.imagePathList && dcData.imagePathList.length > 0) {
+          imageUrl = dcData.imagePathList[0];
+        }
+      } catch {}
+    }
+  }
+
+  // Tenta preço de meta tags ou scripts embutidos
+  let priceStr = $('meta[property="product:price:amount"]').attr("content") || "";
+  
+  // Tenta extrair preço de scripts inline (alguns produtos têm)
+  if (!priceStr) {
+    const priceMatch = html.match(/"formatedActivityPrice"\s*:\s*"([^"]+)"/) ||
+                       html.match(/"formatedPrice"\s*:\s*"([^"]+)"/) ||
+                       html.match(/"minActivityAmount"\s*:\s*{[^}]*"value"\s*:\s*([\d.]+)/) ||
+                       html.match(/"minAmount"\s*:\s*{[^}]*"value"\s*:\s*([\d.]+)/);
+    if (priceMatch) {
+      priceStr = priceMatch[1];
+    }
+  }
+
+  if (!priceStr) return null;
+
+  return {
+    name,
+    price: parseBrlPrice(priceStr),
+    imageUrl: imageUrl || undefined,
+  };
+}
+
 export async function scrapeAliExpress(url: string): Promise<Product> {
   const scrapingAntKey = process.env.SCRAPINGANT_API_KEY;
   
@@ -26,14 +79,39 @@ export async function scrapeAliExpress(url: string): Promise<Product> {
     throw new Error("A chave da API ScrapingAnt não está configurada no .env.");
   }
 
-  // O AliExpress usa Client Side Rendering intensivo, precisamos do browser=true
-  // para que o ScrapingAnt rode o JavaScript da página antes de devolver o HTML
-  const proxyUrl = `https://api.scrapingant.com/v2/general?url=${encodeURIComponent(url)}&x-api-key=${scrapingAntKey}&proxy_country=BR&browser=true`;
+  // === TENTATIVA 1: browser=false (rápido, ~2-3s) ===
+  // Muitas páginas do AliExpress embutem dados no HTML cru
+  const fastUrl = `https://api.scrapingant.com/v2/general?url=${encodeURIComponent(url)}&x-api-key=${scrapingAntKey}&proxy_country=BR&browser=false`;
 
   let response;
   try {
-    response = await fetch(proxyUrl, { 
-      signal: AbortSignal.timeout(60000) 
+    response = await fetch(fastUrl, { signal: AbortSignal.timeout(15000) });
+  } catch {
+    response = null;
+  }
+
+  if (response && response.ok) {
+    const html = await response.text();
+    const fastResult = tryExtractFromRawHtml(html);
+    
+    if (fastResult && fastResult.name && fastResult.price && fastResult.imageUrl) {
+      return {
+        name: fastResult.name,
+        price: fastResult.price,
+        oldPrice: fastResult.oldPrice,
+        imageUrl: fastResult.imageUrl,
+        url,
+        platform: "aliexpress",
+      };
+    }
+  }
+
+  // === TENTATIVA 2: browser=true (lento, ~10-20s, mas pega tudo) ===
+  const fullUrl = `https://api.scrapingant.com/v2/general?url=${encodeURIComponent(url)}&x-api-key=${scrapingAntKey}&proxy_country=BR&browser=true`;
+
+  try {
+    response = await fetch(fullUrl, { 
+      signal: AbortSignal.timeout(55000) 
     });
   } catch (err: any) {
     if (err.name === 'TimeoutError' || err.name === 'AbortError') {
@@ -59,7 +137,7 @@ export async function scrapeAliExpress(url: string): Promise<Product> {
   if (name.includes(" | ")) name = name.split(" | ")[0].trim();
   if (name.toLowerCase().startsWith("aliexpress")) name = name.replace(/^aliexpress/i, "").trim();
 
-  // Preços
+  // Preços - selectors do DOM renderizado
   const priceStr = 
     $("[class*='price-default--current']").first().text().trim() || 
     $('meta[property="product:price:amount"]').attr("content");
@@ -69,7 +147,7 @@ export async function scrapeAliExpress(url: string): Promise<Product> {
     $("[class*='price-default--priceExtraFont']").first().text().trim();
 
   if (!priceStr || !name) {
-    throw new Error("Produto encontrado, mas sem informações de preço ou nome. Pode ser uma página de captcha ou promoção que não expirou corretamente.");
+    throw new Error("Produto encontrado, mas sem informações de preço ou nome.");
   }
 
   const price = parseBrlPrice(priceStr);
@@ -83,7 +161,7 @@ export async function scrapeAliExpress(url: string): Promise<Product> {
   }
 
   // Cupom (se houver na página)
-  let coupon = $("[class*='coupon-block--box']").first().text().trim();
+  const coupon = $("[class*='coupon-block--box']").first().text().trim();
 
   return {
     name,
@@ -91,7 +169,7 @@ export async function scrapeAliExpress(url: string): Promise<Product> {
     oldPrice,
     imageUrl,
     coupon: coupon || undefined,
-    url: url, // a url de afiliado vai ser preservada e inserida pelo frontend
+    url,
     platform: "aliexpress"
   };
 }
