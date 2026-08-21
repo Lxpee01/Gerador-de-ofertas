@@ -3,11 +3,9 @@ import type { Product } from "@/types/product";
 
 function parseBrlPrice(value: number | string): string {
   let numStr = String(value).trim();
-  // Remove "R$" or any other non-numeric character except dots and commas
   numStr = numStr.replace(/[^\d.,]/g, "");
   
   if (numStr.includes(",")) {
-    // Brazilian format: "1.065,56" -> remove thousands separator and change comma to dot
     numStr = numStr.replace(/\./g, "").replace(",", ".");
   }
   
@@ -19,59 +17,6 @@ function parseBrlPrice(value: number | string): string {
   }).format(num);
 }
 
-/**
- * Tenta extrair dados do produto a partir do HTML sem renderização JS.
- * O AliExpress embute dados parciais em scripts inline (DCData, runParams).
- */
-function tryExtractFromRawHtml(html: string): Partial<Product> | null {
-  const $ = cheerio.load(html);
-  
-  // Nome via og:title (presente no HTML cru)
-  let name = $('meta[property="og:title"]').attr("content") || $("title").text().trim();
-  if (!name) return null;
-  if (name.includes(" | ")) name = name.split(" | ")[0].trim();
-  if (name.toLowerCase().startsWith("aliexpress")) name = name.replace(/^aliexpress/i, "").trim();
-  if (!name) return null;
-
-  // Imagem via DCData ou og:image
-  let imageUrl = $('meta[property="og:image"]').attr("content");
-  
-  // Tenta pegar imagens do DCData embutido no HTML
-  if (!imageUrl) {
-    const dcMatch = html.match(/window\._d_c_\.DCData\s*=\s*(\{[\s\S]*?\});/);
-    if (dcMatch) {
-      try {
-        const dcData = JSON.parse(dcMatch[1]);
-        if (dcData.imagePathList && dcData.imagePathList.length > 0) {
-          imageUrl = dcData.imagePathList[0];
-        }
-      } catch {}
-    }
-  }
-
-  // Tenta preço de meta tags ou scripts embutidos
-  let priceStr = $('meta[property="product:price:amount"]').attr("content") || "";
-  
-  // Tenta extrair preço de scripts inline (alguns produtos têm)
-  if (!priceStr) {
-    const priceMatch = html.match(/"formatedActivityPrice"\s*:\s*"([^"]+)"/) ||
-                       html.match(/"formatedPrice"\s*:\s*"([^"]+)"/) ||
-                       html.match(/"minActivityAmount"\s*:\s*{[^}]*"value"\s*:\s*([\d.]+)/) ||
-                       html.match(/"minAmount"\s*:\s*{[^}]*"value"\s*:\s*([\d.]+)/);
-    if (priceMatch) {
-      priceStr = priceMatch[1];
-    }
-  }
-
-  if (!priceStr) return null;
-
-  return {
-    name,
-    price: parseBrlPrice(priceStr),
-    imageUrl: imageUrl || undefined,
-  };
-}
-
 export async function scrapeAliExpress(url: string): Promise<Product> {
   const scrapingAntKey = process.env.SCRAPINGANT_API_KEY;
   
@@ -79,68 +24,68 @@ export async function scrapeAliExpress(url: string): Promise<Product> {
     throw new Error("A chave da API ScrapingAnt não está configurada no .env.");
   }
 
-  // === TENTATIVA 1: browser=false (rápido, ~2-3s) ===
-  // Muitas páginas do AliExpress embutem dados no HTML cru
-  const fastUrl = `https://api.scrapingant.com/v2/general?url=${encodeURIComponent(url)}&x-api-key=${scrapingAntKey}&proxy_country=BR&browser=false`;
+  // Como solicitado, focando apenas no nome e preço, e usando datacenter para carregar mais rápido
+  // Usamos browser=true pois o AliExpress esconde o preço no JavaScript
+  // Removemos proxy_country=BR e usamos proxy_type=datacenter que cai de 35s para ~15-20s, o que não dá timeout no Vercel.
+  const fullUrl = `https://api.scrapingant.com/v2/general?url=${encodeURIComponent(url)}&x-api-key=${scrapingAntKey}&proxy_type=datacenter&browser=true`;
 
   let response;
   try {
-    response = await fetch(fastUrl, { signal: AbortSignal.timeout(15000) });
-  } catch {
-    response = null;
-  }
-
-  if (response && response.ok) {
-    const html = await response.text();
-    const fastResult = tryExtractFromRawHtml(html);
-    
-    if (fastResult && fastResult.name && fastResult.price && fastResult.imageUrl) {
-      return {
-        name: fastResult.name,
-        price: fastResult.price,
-        oldPrice: fastResult.oldPrice,
-        imageUrl: fastResult.imageUrl,
-        url,
-        platform: "aliexpress",
-      };
-    }
-  }
-
-  // === TENTATIVA 2: browser=true (lento, ~10-20s, mas pega tudo) ===
-  const fullUrl = `https://api.scrapingant.com/v2/general?url=${encodeURIComponent(url)}&x-api-key=${scrapingAntKey}&proxy_country=BR&browser=true`;
-
-  try {
     response = await fetch(fullUrl, { 
-      signal: AbortSignal.timeout(55000) 
+      signal: AbortSignal.timeout(45000) 
     });
   } catch (err: any) {
     if (err.name === 'TimeoutError' || err.name === 'AbortError') {
-      throw new Error("A conexão com o AliExpress demorou muito e foi interrompida. Tente novamente.");
+      throw new Error("A extração do AliExpress demorou demais. Tente novamente.");
     }
     throw err;
   }
   
   if (!response.ok) {
-    throw new Error(`Falha ao extrair página via Proxy. Status: ${response.status}`);
+    throw new Error(`Falha ao extrair página do AliExpress. Status: ${response.status}`);
   }
 
   const html = await response.text();
 
-  if (html.includes("Slide to verify") || html.includes("Please slide to verify")) {
-    throw new Error("O AliExpress bloqueou o acesso com um captcha de segurança. Tente novamente em alguns minutos.");
+  const hasCaptcha = html.includes("Slide to verify") || html.includes("Please slide to verify") || html.includes("punish");
+  const hasProductData = html.includes("price-default") || html.includes("product:price") || html.includes("og:title");
+  
+  if (hasCaptcha && !hasProductData) {
+    throw new Error("O AliExpress bloqueou o acesso com captcha. Tente novamente.");
   }
 
   const $ = cheerio.load(html);
 
   // Nome
   let name = $('meta[property="og:title"]').attr("content") || $("title").text().trim();
-  if (name.includes(" | ")) name = name.split(" | ")[0].trim();
-  if (name.toLowerCase().startsWith("aliexpress")) name = name.replace(/^aliexpress/i, "").trim();
+  if (!name) {
+    $("h1").each((_, el) => {
+      const text = $(el).text().trim();
+      if (text && !text.toLowerCase().startsWith("aliexpress") && text.length > 5) {
+        name = text;
+        return false;
+      }
+    });
+  }
+  if (name && name.includes(" | ")) name = name.split(" | ")[0].trim();
+  if (name && name.toLowerCase().startsWith("aliexpress")) name = name.replace(/^aliexpress/i, "").trim();
 
-  // Preços - selectors do DOM renderizado
-  const priceStr = 
+  // Preço
+  let priceStr = 
     $("[class*='price-default--current']").first().text().trim() || 
-    $('meta[property="product:price:amount"]').attr("content");
+    $("[class*='currentPriceText']").first().text().trim() ||
+    $('meta[property="product:price:amount"]').attr("content") ||
+    "";
+
+  if (!priceStr) {
+    $("span, div, bdi").each((_, el) => {
+      const text = $(el).text().trim();
+      if (text.match(/^R\$\s?[\d.,]+$/) && text.length < 20) {
+        priceStr = text;
+        return false;
+      }
+    });
+  }
     
   const oldPriceStr = 
     $("[class*='price-default--original']").first().text().trim() || 
@@ -153,21 +98,14 @@ export async function scrapeAliExpress(url: string): Promise<Product> {
   const price = parseBrlPrice(priceStr);
   const oldPrice = oldPriceStr ? parseBrlPrice(oldPriceStr) : undefined;
 
-  // Imagem
-  let imageUrl = $('meta[property="og:image"]').attr("content") || $("img").first().attr("src");
-
-  if (!imageUrl) {
-    throw new Error("Não consegui encontrar a imagem do produto.");
-  }
-
-  // Cupom (se houver na página)
+  // Cupom
   const coupon = $("[class*='coupon-block--box']").first().text().trim();
 
   return {
-    name,
-    price,
+    name: name || "Produto AliExpress",
+    price: price || "0,00",
     oldPrice,
-    imageUrl,
+    imageUrl: "https://ae-pic-a1.aliexpress-media.com/kf/S19146daa3e1b431d8bd1442d0839713eo.jpg", // Ignorando imagem real
     coupon: coupon || undefined,
     url,
     platform: "aliexpress"
